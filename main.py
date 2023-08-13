@@ -7,6 +7,7 @@ from tinydb import TinyDB, Query
 import json
 import time
 import pygame
+import uuid
 
 load_dotenv()
 
@@ -15,10 +16,11 @@ recognizer = sr.Recognizer()
 
 # Set your API keys here
 openai.api_key = os.environ["openai_key"]
-playht_api_key = "YOUR_PLAYHT_API_KEY"
 
+# Set the NOSQL storage unit for the conversation
 db = TinyDB('conversation_history.json')
 
+# Directory for storing the audio
 audio_directory = "audio_files"
 
 def speech_to_text():
@@ -39,38 +41,26 @@ def speech_to_text():
         return None
 
 
-def generate_response(prompt):
+def generate_response_chatGPT(history):
+
+    print('history')
+    print(history)
+
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
-        messages=[
-            {"role": "system", "content": "You are a helpful assistant. You will be providing assistance to people who are scheduling an appointment. My free times are Monday 1PM EST to 3 PM EST."},
-            {"role": "user", "content": prompt}
-        ]
+        messages=history["messages"]
     )
     return response.choices[0].message.content.strip()
 
-def get_voices():
-    url = "https://play.ht/api/v2/voices"
-
-    headers = {"accept": "application/json",
-               'Authorization': "Bearer " + os.environ["playht_secret"],
-               'X-User-ID': os.environ["playht_user_id"],
-               }
-
-    response = requests.get(url, headers=headers)
-
-    print(response.text)
-    for item in json.loads(response.text):
-        if item["accent"] == "american" and item["age"] == "adult" and item["gender"] == "female":
-            print(item)
 
 def text_to_audio(text):
     url = "https://play.ht/api/v2/tts"
 
     payload = {
-        "quality": "high",
+        "quality": "premium",
         "output_format": "mp3",
-        "speed": 1,
+        "speed": 1.05,
+        "seed": 2,
         "sample_rate": 24000,
         "voice": "alphonso",
         "text": text
@@ -89,12 +79,13 @@ def text_to_audio(text):
     else:
         return None
 
+
 def get_playht_job(job_id):
     url = "https://play.ht/api/v2/tts/" + job_id
 
     headers = {
         "accept": "application/json",
-        'Authorization':"Bearer " + os.environ["playht_secret"],
+        'Authorization': "Bearer " + os.environ["playht_secret"],
         'X-User-ID': os.environ["playht_user_id"],
     }
 
@@ -117,6 +108,7 @@ def download_mp3(url, save_path):
     else:
         print(f"Failed to download from '{url}'. Status code: {response.status_code}")
 
+
 def run_speech_detection():
     spoken_text = speech_to_text()
 
@@ -126,6 +118,7 @@ def run_speech_detection():
     else:
         return spoken_text
 
+
 def play_mp3(file_path):
     pygame.mixer.init()
     pygame.mixer.music.load(file_path)
@@ -133,32 +126,84 @@ def play_mp3(file_path):
     while pygame.mixer.music.get_busy():
         continue
 
+
+def get_conversation_by_id(conversation_id):
+    # Query the database to find the record with the given conversation_id
+    conversation = Query()
+    result = db.get(conversation.conversation_id == conversation_id)
+
+    if result:
+        return json.loads(json.dumps(result, indent=4))
+    else:
+        return None
+
+
+def upsert_history(conversation_id, role, message):
+
+    conversation = get_conversation_by_id(conversation_id)
+
+    if conversation is None:
+        conversation = {
+            "conversation_id" : conversation_id,
+            "messages": [{'role': 'system', 'content': os.environ["prompt_engineering"]}]
+        }
+
+    conversation["messages"].append({'role': role, 'content': message})
+
+    item_query = Query()
+    existing_item = db.get(item_query.conversation_id == conversation_id)
+
+    if existing_item:
+        db.update(conversation, item_query.conversation_id == conversation_id)
+    else:
+        db.insert(conversation)
+
+
 def main():
+
+    program_state = "Setting up"
+
+    # Generate a UUID for the conversation
+    conversation_id = str(uuid.uuid4())
 
     if not os.path.exists(audio_directory):
         os.makedirs(audio_directory)
 
-    # Step 1: Convert speech to text
-    spoken_text = run_speech_detection()
-    print('you said ', spoken_text)
+    while True:
+        # Step 1: Convert speech to text
+        program_state = "Waiting on User input"
+        spoken_text = run_speech_detection()
+        print('%%% You said ', spoken_text)
 
-    # Step 2: Generate response
-    response_text = generate_response(spoken_text)
-    print("Generated Response:", response_text)
+        upsert_history(conversation_id, 'user', spoken_text)
 
-    # Step 3: Convert response to audio
-    response_audio = text_to_audio(response_text)
-    audio_file = get_playht_job(response_audio["id"])
+        # Step 2: Generate response
+        program_state = "Waiting on ChatGPT output"
+        response_text = generate_response_chatGPT(get_conversation_by_id(conversation_id))
+        print("%%% Generated Response:", response_text)
 
-    while audio_file["output"] is None:
-        time.sleep(2)
+        # Step 3: Upsert local conversation history
+        upsert_history(conversation_id, 'system', response_text)
+
+        # Step 4: Convert response to audio
+        program_state = "Converting text to audio"
+        response_audio = text_to_audio(response_text)
         audio_file = get_playht_job(response_audio["id"])
 
-    audio_file_location = audio_file["output"]["url"]
+        while audio_file["output"] is None:
+            # higher the grade audio, the longer it takes to populate. Keep trying until you get it
+            time.sleep(2)
+            audio_file = get_playht_job(response_audio["id"])
 
-    download_mp3(url=audio_file_location, save_path=os.path.join(audio_directory, "response_audio.mp3"))
+        # Step 5: Download the audio
+        program_state = "Downloading audio"
+        audio_file_location = audio_file["output"]["url"]
+        download_mp3(url=audio_file_location, save_path=os.path.join(audio_directory, "response_audio.mp3"))
 
-    play_mp3(os.path.join(audio_directory, "response_audio.mp3"))
+        # Step 6: Play the audio to the end user
+        program_state = "Playing audio"
+        play_mp3(os.path.join(audio_directory, "response_audio.mp3"))
+
 
 if __name__ == "__main__":
     main()
