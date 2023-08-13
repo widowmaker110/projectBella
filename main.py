@@ -43,9 +43,6 @@ def speech_to_text():
 
 def generate_response_chatGPT(history):
 
-    print('history')
-    print(history)
-
     response = openai.ChatCompletion.create(
         model="gpt-3.5-turbo",
         messages=history["messages"]
@@ -59,10 +56,10 @@ def text_to_audio(text):
     payload = {
         "quality": "premium",
         "output_format": "mp3",
-        "speed": 1.05,
-        "seed": 2,
+        "speed": 1,
+        "seed": 4,
         "sample_rate": 24000,
-        "voice": "alphonso",
+        "voice": "victor",
         "text": text
     }
     headers = {
@@ -203,7 +200,6 @@ def main():
         # Step 6: Play the audio to the end user
         program_state = "Playing audio"
         play_mp3(os.path.join(audio_directory, "response_audio.mp3"))
-
 
 if __name__ == "__main__":
     main()
